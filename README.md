@@ -15,6 +15,7 @@
 - [시작 안내 및 실행 방법](#-시작-안내-및-실행-방법)
 - [환경 변수 설정](#-환경-변수-설정)
 - [테스트 및 검증](#-테스트-및-검증)
+- [Supabase 데이터베이스 스키마 및 아키텍처](#️-supabase-데이터베이스-스키마-및-아키텍처)
 
 ---
 
@@ -232,39 +233,103 @@ npm run build
 
 ---
 
-## 📋 데이터 모델 (Prisma Schema)
+## 🗄️ Supabase 데이터베이스 스키마 및 아키텍처
 
+본 프로젝트는 **Prisma ORM (`@prisma/client` v7)**을 통해 **Supabase PostgreSQL** 데이터베이스 모델을 정의하고 있으며, 무결성과 트랜잭션 안정성(멱등성 보장, 과거 주문 내역 스냅샷, 참조 무결성 보호 등)을 최우선으로 고려한 **4개의 핵심 모델**로 구성되어 있습니다.
+
+### 1. 개체-관계 도표 (ER Diagram)
+
+```mermaid
+erDiagram
+    StoreSettings {
+        int id PK
+        boolean isOpen
+        datetime updatedAt
+    }
+    
+    Menu {
+        string id PK
+        string name
+        int price
+        string category
+        int stock
+        int initialStock
+        int lowStockThreshold
+        string imageUrl
+        string availableOptions
+        boolean isActive
+        datetime createdAt
+        datetime updatedAt
+    }
+    
+    Order {
+        string id PK
+        string orderNo UK
+        string requestId UK
+        string guestToken
+        string status
+        string paymentMethod
+        int totalAmount
+        datetime cancelledAt
+        datetime completedAt
+        datetime pickedUpAt
+        datetime createdAt
+        datetime updatedAt
+    }
+    
+    OrderItem {
+        string id PK
+        string orderId FK
+        string menuId FK
+        string menuName
+        string option
+        int quantity
+        int unitPrice
+        int lineTotalAmount
+    }
+
+    Order ||--|{ OrderItem : "contains (Cascade)"
+    Menu ||--o{ OrderItem : "referenced by (Restrict)"
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│  StoreSettings   │    │      Menu        │    │     Order        │
-├─────────────────┤    ├──────────────────┤    ├──────────────────┤
-│ id               │    │ id               │    │ id               │
-│ isOpen           │    │ name             │    │ orderNo (unique) │
-│ updatedAt        │    │ price            │    │ requestId(unique)│
-└─────────────────┘    │ category         │    │ guestToken       │
-                       │ stock            │    │ status           │
-                       │ initialStock     │    │ paymentMethod    │
-                       │ lowStockThreshold│    │ totalAmount      │
-                       │ imageUrl         │    │ cancelledAt      │
-                       │ availableOptions │    │ completedAt      │
-                       │ isActive         │    │ pickedUpAt       │
-                       │ createdAt        │    │ createdAt        │
-                       │ updatedAt        │    │ updatedAt        │
-                       └────────┬─────────┘    └────────┬─────────┘
-                                │                       │
-                                │    ┌──────────────┐   │
-                                └────┤  OrderItem   ├───┘
-                                     ├──────────────┤
-                                     │ id           │
-                                     │ orderId (FK) │
-                                     │ menuId  (FK) │
-                                     │ menuName     │  ← 스냅샷
-                                     │ option       │  ← 스냅샷
-                                     │ quantity     │
-                                     │ unitPrice    │  ← 스냅샷
-                                     │ lineTotalAmt │
-                                     └──────────────┘
-```
+
+### 2. 테이블별 핵심 설계 분석
+
+#### ① `StoreSettings` (매장 영업 상태)
+매장의 오픈/마감 여부를 전역에서 즉각 통제하기 위한 단일 레코드(Singleton) 패턴의 테이블입니다.
+- **`id`**: 기본값 `1` 고정 (단일 설정 행으로 유지)
+- **`isOpen`**: `true`일 때만 고객이 주문을 진행할 수 있도록 통제하는 플래그
+
+#### ② `Menu` (메뉴 및 재고 관리)
+메뉴 정보, 품절 경고 기준, 동적 커스텀 옵션을 관리합니다.
+- **`availableOptions` (JSON String)**: 온도(ICE/HOT), 샷, 시럽, 우유 변경 등 **음료별 다양한 선택 옵션 구성**을 JSON 구조화 문자열로 저장하여 NoSQL 수준의 옵션 구성 유연성을 확보합니다.
+- **`isActive` (Soft Deletion)**: **논리적 삭제 플래그**. 메뉴 단종 시 물리적 DB 삭제를 차단하여, 해당 메뉴를 주문했던 과거 주문 내역의 **외래 키 참조 무결성**을 안전하게 지킵니다.
+- **`lowStockThreshold`**: 품절 임박(예: 3개 이하) 경고를 UI에 실시간 표출하기 위한 임계값입니다.
+- **인덱스 전략 (`@@index([category, isActive])`)**: 고객 화면에서 "해당 카테고리의 활성화된 메뉴"만 빠르게 필터링하여 조회 속도를 극대화합니다.
+
+#### ③ `Order` (주문 및 결제 마스터)
+주문 결제 금액 및 비회원 식별, 주문 처리 상태를 추적하는 마스터 테이블입니다.
+- **`orderNo` (`@unique`)**: 고객 안내용 가독성 좋은 주문번호 (예: `ord_102938`)
+- **`requestId` (`@unique`, ⚡ 멱등성 보장 키)**: 네트워크 타임아웃 등으로 사용자가 결제 버튼을 중복 클릭하거나 네트워크 재전송이 발생해도 DB 차원에서 중복 주문 및 결제 처리를 완벽히 방지합니다.
+- **`guestToken`**: 비회원 고객이 웹페이지 브라우저 세션(Local Storage)의 토큰을 통해 본인의 주문 내역을 식별하고 트래킹할 수 있도록 매핑하는 키입니다.
+- **`status`**: 주문 상태 흐름 (`PENDING` ➔ `PREPARING` ➔ `COMPLETED` ➔ `PICKED_UP` 또는 `CANCELLED`)
+- **인덱스 전략**: `@@index([status, createdAt])`(관리자 KDS 대기열 조회 최적화), `@@index([guestToken])`(고객의 내 주문 조회 속도 최적화)
+
+#### ④ `OrderItem` (주문 품목 및 스냅샷 보존)
+주문 한 건(`Order`)에 포함된 구체적인 개별 메뉴 구성품 내역을 담는 1:N 테이블입니다.
+- **🛡️ 주문 시점 데이터 스냅샷 (`menuName`, `unitPrice`)**: 주문 생성 시점의 메뉴명과 단가를 분리 보존합니다. 훗날 운영자가 메뉴 가격이나 이름을 변경하더라도 **과거 영수증 및 매출 통계가 변조되지 않고 기존 결제액을 그대로 증명**하도록 하는 프로덕션급 모범 설계입니다.
+- **외래 키 제약 조건 (`onDelete`)**:
+  - `Order` 관계 (`Cascade`): 주문 취소/삭제 시 하위 품목 데이터가 함께 마감됩니다.
+  - `Menu` 관계 (`Restrict`): **한 번이라도 주문된 적이 있는 메뉴는 물리적 삭제(Hard Delete)가 DB 단에서 원천 차단**됩니다.
+
+### 3. Supabase 이중 연결 아키텍처 (PgBouncer vs Direct)
+
+서버리스(Next.js) 환경에서 DB 커넥션 풀 고갈(Connection Exhaustion) 방지 및 마이크로 마이그레이션 안정성을 위해 **이중 커넥션 아키텍처**가 적용되어 있습니다.
+
+1. **런타임 앱 쿼리용 (`DATABASE_URL`, 포트 `6543`)**:
+   - `pgbouncer=true` 파라미터가 부여된 **PgBouncer Pooler 트랜잭션 모드**를 사용합니다.
+   - 대규모 다중 접속 시에도 빠른 TCP 세션 재사용을 위해 `@prisma/adapter-pg`와 네이티브 `pg` 드라이버를 활용합니다.
+2. **마이그레이션 CLI용 (`DIRECT_URL`, 포트 `5432`)**:
+   - `npx prisma db push` 등 DB 스키마 DDL 실행을 위해 커넥션 풀을 거치지 않는 **Supabase 세션 모드 다이렉트 통신 URL**을 CLI 설정([prisma.config.ts](file:///d:/ybi/vibe_workspace/ch07/coffee-oder-app/prisma.config.ts))에 분리 적용했습니다.
 
 ---
 
