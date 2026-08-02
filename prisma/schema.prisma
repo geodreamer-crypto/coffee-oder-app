@@ -1,0 +1,66 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model StoreSettings {
+  id        Int      @id @default(1)
+  isOpen    Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+}
+
+model Menu {
+  id                String       @id @default(cuid())
+  name              String
+  price             Int
+  category          String       // "COFFEE" | "NON_COFFEE" | "DESSERT"
+  stock             Int          @default(0)
+  initialStock      Int          @default(0)  // 테스트 초기화 및 기본 재고 복구용 기준값
+  lowStockThreshold Int          @default(3)  // 품절 임박 경고 임계값
+  imageUrl          String?
+  availableOptions  String?      // 음료별 선택 가능 옵션 JSON (온도, 샷, 시럽, 우유, 휘핑 등)
+  isActive          Boolean      @default(true) // 하드 삭제 금지 (과거 주문 참조 무결성 보호용)
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+  orderItems        OrderItem[]
+
+  @@index([category, isActive])
+}
+
+model Order {
+  id            String        @id @default(cuid())
+  orderNo       String        @unique          // 고객 UI 표출용 주문 번호 (예: ord_102938)
+  requestId     String        @unique          // 중복 결제 및 멱등성 보장 방지용 클라이언트 키
+  guestToken    String                         // 비회원 로컬스토리지 매핑용 고유 토큰
+  status        String        @default("PENDING") // "PENDING" | "PREPARING" | "COMPLETED" | "PICKED_UP" | "CANCELLED"
+  paymentMethod String        // "CREDIT_CARD" | "KAKAO_PAY" | "CASH"
+  totalAmount   Int
+  cancelledAt   DateTime?
+  completedAt   DateTime?
+  pickedUpAt    DateTime?
+  createdAt     DateTime      @default(now())  // DB UTC 저장 -> 클라이언트 렌더 시 KST 변환
+  updatedAt     DateTime      @updatedAt
+  items         OrderItem[]
+
+  @@index([status, createdAt])
+  @@index([guestToken])
+}
+
+model OrderItem {
+  id              String             @id @default(cuid())
+  orderId         String
+  menuId          String
+  menuName        String             // 주문 시점의 메뉴명 스냅샷 보존
+  option          String?            // 선택 옵션 (다중 옵션 문자열, 예: ICE | 1샷(+500원))
+  quantity        Int
+  unitPrice       Int                // 주문 시점 단가 스냅샷 보존
+  lineTotalAmount Int                // 항목별 총 합산액 (unitPrice * quantity)
+  order           Order              @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  menu            Menu               @relation(fields: [menuId], references: [id], onDelete: Restrict)
+
+  @@index([orderId])
+  @@index([menuId])
+}
