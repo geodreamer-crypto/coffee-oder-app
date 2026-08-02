@@ -16,7 +16,7 @@ export async function createOrderAction(rawPayload: unknown) {
   const { requestId, guestToken, paymentMethod, items } = parsed.data;
 
   try {
-    const result = await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx: any) => {
       // 1. 멱등성 검증: 동일 requestId 재전송인지 체크
       const existingOrder = await tx.order.findUnique({
         where: { requestId },
